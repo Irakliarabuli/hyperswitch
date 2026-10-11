@@ -7,6 +7,7 @@ import { connectorDetails as deutschebankConnectorDetails } from "./Deutschebank
 import { connectorDetails as gotymeSanlamConnectorDetails } from "./GotymeSanlam.js";
 import { connectorDetails as wiseConnectorDetails } from "./Wise.js";
 import { connectorDetails as nomupayConnectorDetails } from "./Nomupay.js";
+import { connectorDetails as paypalConnectorDetails } from "./Paypal.js";
 import { connectorDetails as truelayerConnectorDetails } from "./Truelayer.js";
 import { connectorDetails as trustlyConnectorDetails } from "./Trustly.js";
 
@@ -17,6 +18,7 @@ const connectorDetails = {
   deutschebank: deutschebankConnectorDetails,
   gotyme_sanlam: gotymeSanlamConnectorDetails,
   nomupay: nomupayConnectorDetails,
+  paypal: paypalConnectorDetails,
   truelayer: truelayerConnectorDetails,
   trustly: trustlyConnectorDetails,
   wise: wiseConnectorDetails,
@@ -116,6 +118,9 @@ export const CONNECTOR_LISTS = {
     // 00009-PayoutSync.cy.js spec rather than the generic BANK_TRANSFER_SEPA
     // flow in 00004-BankTransfer.cy.js.
     PAYOUT_SYNC: ["deutschebank"],
+    // Client-authenticated payout confirm (PR #14547) - only verified
+    // connectors
+    CLIENT_AUTH_CONFIRM: ["paypal"],
     BANK_TRANSFER_OPEN_BANKING: ["truelayer", "trustly"],
     BANK_TRANSFER_OPEN_BANKING_INVALID_REFERENCE_FULFILL: [],
     BANK_TRANSFER_OPEN_BANKING_MANUAL_FULFILL: ["trustly"],
