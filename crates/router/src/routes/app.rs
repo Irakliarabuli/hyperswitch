@@ -874,6 +874,7 @@ impl Payments {
             .service(
                 web::resource("/aggregate").route(web::get().to(payments::get_payments_aggregates)),
             )
+            // TODO: Deprecated. Remove this in favour of /v2/recovery
             .service(
                 web::resource("/recovery")
                     .route(web::post().to(payments::recovery_payments_create)),
@@ -3482,9 +3483,10 @@ pub struct RevenueRecovery;
 #[cfg(all(feature = "v2", feature = "oltp"))]
 impl RevenueRecovery {
     pub fn server(state: AppState) -> Scope {
-        use super::revenue_recovery;
+        use super::{payments, revenue_recovery};
         web::scope("/v2/recovery")
             .app_data(web::Data::new(state))
+            .service(web::resource("").route(web::post().to(payments::recovery_payments_create)))
             .service(
                 web::resource("/{merchant_reference_id}/cancel")
                     .route(web::post().to(revenue_recovery::revenue_recovery_cancel)),
