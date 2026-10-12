@@ -8,6 +8,10 @@ ARG VERSION_FEATURE_SET="v1"
 # (unoptimized). Features are untouched by this choice.
 ARG CARGO_BUILD_PROFILE=release
 
+# Optional cap on parallel rustc jobs (cargo's `-j`). Leave empty for cargo's
+# default (number of CPUs); set to e.g. `2` on memory-constrained CI runners.
+ARG CARGO_BUILD_JOBS=""
+
 RUN apt-get update \
     && apt-get install -y libpq-dev libssl-dev pkg-config protobuf-compiler
 
@@ -37,6 +41,7 @@ ENV RUST_BACKTRACE="short"
 
 COPY . .
 RUN cargo build \
+    ${CARGO_BUILD_JOBS:+-j ${CARGO_BUILD_JOBS}} \
     --profile ${CARGO_BUILD_PROFILE} \
     --no-default-features \
     --features release \

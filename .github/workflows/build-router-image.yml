@@ -1,0 +1,146 @@
+name: Build router image (keepz-connector)
+
+on:
+  push:
+    branches:
+      - keepz-connector
+  workflow_dispatch:
+    inputs:
+      cargo_build_profile:
+        description: "Cargo profile for the image (release, release-fast or dev)"
+        required: false
+        default: "release"
+      cargo_build_jobs:
+        description: "Cap on parallel rustc jobs inside the image build (empty = all CPUs; use 2 if the runner runs out of memory)"
+        required: false
+        default: ""
+
+concurrency:
+  group: build-router-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/irakliarabuli/hyperswitch-router
+
+jobs:
+  check:
+    name: cargo check + keepz unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Free runner disk space
+        run: |
+          set -eux
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: true
+
+      - name: Get rust version from Cargo.toml
+        shell: bash
+        run: |
+          rust_version=$(yq -oy '.workspace.package.rust-version' Cargo.toml)
+          echo "rust_version=${rust_version}" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "${{ env.rust_version }}"
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: cargo check hyperswitch_connectors (v1)
+        run: cargo check -p hyperswitch_connectors --features v1
+
+      - name: Keepz unit tests
+        run: cargo test -p hyperswitch_connectors --features v1 --lib -- keepz
+
+      - name: cargo check router (release)
+        run: cargo check -p router --features release
+
+  build:
+    name: docker buildx (linux/amd64, BINARY=router)
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Free runner disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          echo "sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "tags=${IMAGE}:keepz-${short_sha},${IMAGE}:keepz-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            BINARY=router
+            RUN_ENV=sandbox
+            CARGO_BUILD_PROFILE=${{ github.event.inputs.cargo_build_profile || 'release' }}
+            CARGO_BUILD_JOBS=${{ github.event.inputs.cargo_build_jobs || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Hyperswitch router with the Keepz connector (branch keepz-connector)
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image pushed"
+            echo
+            echo '```'
+            echo "${IMAGE}:keepz-${{ steps.tags.outputs.sha }}"
+            echo "${IMAGE}:keepz-latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
