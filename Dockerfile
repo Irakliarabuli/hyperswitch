@@ -1,4 +1,10 @@
-FROM public.ecr.aws/docker/library/rust:trixie as builder
+# Base images are overridable so CI can pull from a registry that does not
+# rate-limit the runner (public.ecr.aws returns 429 for anonymous pulls from
+# shared GitHub-hosted runner IPs).
+ARG RUST_BASE_IMAGE=public.ecr.aws/docker/library/rust:trixie
+ARG RUNTIME_BASE_IMAGE=public.ecr.aws/docker/library/debian:trixie
+
+FROM ${RUST_BASE_IMAGE} as builder
 
 ARG EXTRA_FEATURES=""
 ARG VERSION_FEATURE_SET="v1"
@@ -57,7 +63,7 @@ RUN mkdir -p /router/out \
 
 
 
-FROM public.ecr.aws/docker/library/debian:trixie
+FROM ${RUNTIME_BASE_IMAGE}
 
 # Placing config and binary executable in different directories
 ARG CONFIG_DIR=/local/config

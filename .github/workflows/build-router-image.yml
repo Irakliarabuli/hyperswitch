@@ -128,6 +128,8 @@ jobs:
           provenance: false
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
+            RUST_BASE_IMAGE=docker.io/library/rust:trixie
+            RUNTIME_BASE_IMAGE=docker.io/library/debian:trixie
             BINARY=router
             RUN_ENV=sandbox
             CARGO_BUILD_PROFILE=${{ github.event.inputs.cargo_build_profile || 'release' }}
