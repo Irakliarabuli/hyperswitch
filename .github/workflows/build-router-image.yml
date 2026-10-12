@@ -132,6 +132,7 @@ jobs:
             RUNTIME_BASE_IMAGE=docker.io/library/debian:trixie
             BINARY=router
             RUN_ENV=sandbox
+            EXTRA_FEATURES=--features redis-rs
             CARGO_BUILD_PROFILE=${{ github.event.inputs.cargo_build_profile || 'release' }}
             BUILD_JOBS=${{ github.event.inputs.cargo_build_jobs || '' }}
           labels: |
