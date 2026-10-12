@@ -133,7 +133,7 @@ jobs:
             BINARY=router
             RUN_ENV=sandbox
             CARGO_BUILD_PROFILE=${{ github.event.inputs.cargo_build_profile || 'release' }}
-            CARGO_BUILD_JOBS=${{ github.event.inputs.cargo_build_jobs || '' }}
+            BUILD_JOBS=${{ github.event.inputs.cargo_build_jobs || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
