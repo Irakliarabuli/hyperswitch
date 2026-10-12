@@ -68,11 +68,14 @@ jobs:
       - name: Install rust cache
         uses: Swatinem/rust-cache@v2.9.1
 
-      - name: cargo check hyperswitch_connectors (v1)
-        run: cargo check -p hyperswitch_connectors --features v1
+      # The connectors crate only compiles with the feature set the router
+      # enables through `common_default` (frm, payouts); `v1` alone fails in
+      # unrelated connectors.
+      - name: cargo check hyperswitch_connectors (v1,frm,payouts)
+        run: cargo check -p hyperswitch_connectors --features "v1,frm,payouts"
 
       - name: Keepz unit tests
-        run: cargo test -p hyperswitch_connectors --features v1 --lib -- keepz
+        run: cargo test -p hyperswitch_connectors --features "v1,frm,payouts" --lib -- keepz
 
       - name: cargo check router (release)
         run: cargo check -p router --features release
