@@ -108,6 +108,7 @@ impl ForeignTryFrom<api_enums::Connector> for euclid::enums::RoutableConnectors 
                     message: "juspaythreedsserver is not a routable connector".to_string(),
                 })?
             }
+            api_enums::Connector::Keepz => Self::Keepz,
             api_enums::Connector::Klarna => Self::Klarna,
             api_enums::Connector::Loonio => Self::Loonio,
             api_enums::Connector::Mifinity => Self::Mifinity,

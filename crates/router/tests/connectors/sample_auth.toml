@@ -191,6 +191,12 @@ api_key="API Key"
 [gocardless]
 api_key="API Key"
 
+[keepz]
+api_key = "Integrator ID"
+key1 = "Keepz RSA Public Key"
+api_secret = "Integrator RSA Private Key"
+key2 = "Receiver ID"
+
 [volt]
 api_key = "Username"
 api_secret = "Password"

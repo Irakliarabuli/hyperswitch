@@ -9264,3 +9264,12 @@ payment_method_type = "DinersClub"
 [merchante.connector_auth.BodyKey]
 api_key = "Profile Key"
 key1 = "Profile ID"
+
+[keepz]
+[[keepz.bank_redirect]]
+  payment_method_type = "local_bank_redirect"
+[keepz.connector_auth.MultiAuthKey]
+api_key = "Integrator ID"
+key1 = "Keepz RSA Public Key (PEM or base64 DER)"
+api_secret = "Integrator RSA Private Key (PEM or base64 PKCS#8 DER)"
+key2 = "Receiver (Branch) ID"

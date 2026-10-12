@@ -137,6 +137,7 @@ pub enum Connector {
     Jpmorgan,
     Juspay,
     Juspaythreedsserver,
+    Keepz,
     Klarna,
     Loonio,
     Merchante,
@@ -399,6 +400,7 @@ impl Connector {
             | Self::Jpmorgan
             | Self::Juspay
             | Self::Juspaythreedsserver
+            | Self::Keepz
             | Self::Klarna
             | Self::Loonio
             | Self::Merchante

@@ -73,6 +73,7 @@ mod itaubank;
 mod jpmorgan;
 mod juspaythreedsserver;
 mod katapult;
+mod keepz;
 mod loonio;
 mod mifinity;
 mod mollie;

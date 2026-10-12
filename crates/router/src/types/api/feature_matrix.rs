@@ -248,6 +248,9 @@ impl FeatureMatrixConnectorData {
                 enums::Connector::Juspaythreedsserver => Ok(ConnectorEnum::Old(Box::new(
                     connector::Juspaythreedsserver::new(),
                 ))),
+                enums::Connector::Keepz => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Keepz::new())))
+                }
                 enums::Connector::Klarna => {
                     Ok(ConnectorEnum::Old(Box::new(connector::Klarna::new())))
                 }
