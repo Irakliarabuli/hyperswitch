@@ -14,6 +14,10 @@ on:
         description: "Cap on parallel rustc jobs inside the image build (empty = all CPUs; use 2 if the runner runs out of memory)"
         required: false
         default: ""
+      runner:
+        description: "Runner label for the image build (ubuntu-latest is too small: the release build OOM-kills the runner even with 2 jobs; use a larger/self-hosted label)"
+        required: false
+        default: "ubuntu-latest"
 
 concurrency:
   group: build-router-image-${{ github.ref }}
@@ -80,10 +84,14 @@ jobs:
       - name: cargo check router (release)
         run: cargo check -p router --features release
 
+  # The image build is dispatch-only: on GitHub-hosted ubuntu-latest the
+  # release (LTO) build exhausts memory and the runner is lost after ~90 min,
+  # even with BUILD_JOBS=2. Pushes still run the fast `check` job above.
   build:
     name: docker buildx (linux/amd64, BINARY=router)
+    if: github.event_name == 'workflow_dispatch'
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 360
 
     steps:
