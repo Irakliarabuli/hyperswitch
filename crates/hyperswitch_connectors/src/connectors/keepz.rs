@@ -841,4 +841,40 @@ mod tests {
             assert_eq!(referenced_order(&request), None, "{query}");
         }
     }
+
+    /// `Connector::Keepz` is in the router's acknowledge-on-failure switch,
+    /// so the answer to a failed callback is whatever this connector says.
+    /// It says the same thing every time: a plain 200 for a callback that
+    /// worked, for one whose reference names nothing, and for one whose
+    /// processing failed. This pins the trait default, which Keepz relies on.
+    #[test]
+    fn every_callback_gets_the_same_acknowledgement() {
+        let headers = actix_web::http::header::HeaderMap::new();
+        for query in [format!("ref={ORDER_ID}"), "ref=nothing".to_string(), String::new()] {
+            let request = callback(&headers, &query, b"");
+            let acknowledged = |error_kind| {
+                matches!(
+                    Keepz::new().get_webhook_api_response(&request, error_kind, None),
+                    Ok(hyperswitch_domain_models::api::WebhookResponse::StatusOk)
+                )
+            };
+            assert!(acknowledged(None), "{query}");
+            assert!(
+                acknowledged(Some(webhooks::IncomingWebhookFlowError::ResourceNotFound)),
+                "{query}"
+            );
+            assert!(
+                acknowledged(Some(webhooks::IncomingWebhookFlowError::InternalError)),
+                "{query}"
+            );
+        }
+    }
+
+    /// The source of a callback is never verified (`verify_webhook_source`
+    /// answers false), and that must not be mandatory: the router would then
+    /// reject every callback instead of running the status call.
+    #[test]
+    fn source_verification_is_not_mandatory() {
+        assert!(!Keepz::new().is_webhook_source_verification_mandatory());
+    }
 }
