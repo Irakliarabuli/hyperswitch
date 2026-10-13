@@ -503,7 +503,10 @@ impl Connector {
     }
 
     pub fn should_acknowledge_webhook_for_resource_not_found_errors(self) -> bool {
-        matches!(self, Self::Adyenplatform | Self::Adyen)
+        // Keepz: its callback is an unsigned trigger addressed by an order id
+        // in the URL. Every callback gets the same 200, whether or not that id
+        // names a payment, so the endpoint says nothing about which ids exist.
+        matches!(self, Self::Adyenplatform | Self::Adyen | Self::Keepz)
     }
 
     pub fn should_store_google_pay_pan_only_for_three_ds(
