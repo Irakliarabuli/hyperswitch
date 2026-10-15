@@ -357,6 +357,61 @@ impl<F, T> TryFrom<ResponseRouterData<F, KeepzOrderStatusResponse, T, PaymentsRe
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cancelling an order the payer has not finished (PreAuthorizeVoid)
+// ---------------------------------------------------------------------------
+
+// The router cancels a payment that waits for the payer
+// (`requires_customer_action`) through the PreAuthorizeVoid flow, and only for
+// a connector that declares `is_pre_authorize_cancel_supported`; otherwise it
+// marks the payment cancelled without asking the connector, and the Keepz
+// order stays payable. Keepz cancels an order in INITIAL or PROCESSING
+// (`DELETE /order/cancel`; an open-banking order is PROCESSING from its
+// creation). Only Keepz' CANCELLED is a cancelled payment. Anything else
+// (Keepz refused, the order is already paid or failed, Keepz is unreachable)
+// leaves the payment waiting for the payer, so the merchant sees the refusal
+// and the next status call says what the order really is.
+
+/// The attempt status a refused or failed cancel leaves: the status the
+/// payment had (Keepz' create-order maps to it), so nothing is cancelled that
+/// Keepz did not cancel.
+pub const CANCEL_REFUSED_ATTEMPT_STATUS: enums::AttemptStatus =
+    enums::AttemptStatus::AuthenticationPending;
+
+/// The outcome of Keepz' answer to a cancel: `Voided` only for CANCELLED.
+pub fn cancel_outcome(
+    response: &KeepzOrderStatusResponse,
+    http_code: u16,
+    reference_id: &str,
+) -> (
+    enums::AttemptStatus,
+    Result<PaymentsResponseData, ErrorResponse>,
+) {
+    if response.status == KeepzOrderStatus::Canceled {
+        return (
+            enums::AttemptStatus::Voided,
+            Ok(transaction_response(response, reference_id)),
+        );
+    }
+    let status = response.status.to_string();
+    (
+        CANCEL_REFUSED_ATTEMPT_STATUS,
+        Err(ErrorResponse {
+            status_code: http_code,
+            code: status.clone(),
+            message: format!("Keepz did not cancel the order; its status is {status}"),
+            reason: Some(status),
+            attempt_status: Some(CANCEL_REFUSED_ATTEMPT_STATUS),
+            connector_transaction_id: Some(response.integrator_order_id.clone()),
+            connector_response_reference_id: None,
+            network_advice_code: None,
+            network_decline_code: None,
+            network_error_message: None,
+            connector_metadata: None,
+        }),
+    )
+}
+
 fn transaction_response(
     response: &KeepzOrderStatusResponse,
     reference_id: &str,
@@ -833,6 +888,47 @@ mod tests {
             let metadata = json!({ "keepz_bank": value });
             assert!(open_banking_provider(Some(&metadata)).is_err(), "{metadata}");
         }
+    }
+
+    fn order(status: KeepzOrderStatus) -> KeepzOrderStatusResponse {
+        KeepzOrderStatusResponse {
+            integrator_order_id: "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d".to_string(),
+            status,
+            transaction_id: None,
+            amount: None,
+            original_amount: None,
+        }
+    }
+
+    #[test]
+    fn only_keepz_cancelled_cancels_the_payment() {
+        let (status, response) = cancel_outcome(&order(KeepzOrderStatus::Canceled), 200, "pay_1_1");
+        assert_eq!(status, enums::AttemptStatus::Voided);
+        assert!(response.is_ok());
+        for other in [
+            KeepzOrderStatus::Initial,
+            KeepzOrderStatus::Processing,
+            KeepzOrderStatus::Success,
+            KeepzOrderStatus::Failed,
+            KeepzOrderStatus::Expired,
+            KeepzOrderStatus::RefundRequested,
+            KeepzOrderStatus::Unknown,
+        ] {
+            let (status, response) = cancel_outcome(&order(other), 200, "pay_1_1");
+            assert_eq!(status, enums::AttemptStatus::AuthenticationPending, "{other}");
+            let error = response.expect_err("not cancelled");
+            assert_eq!(error.code, other.to_string());
+            assert_eq!(error.attempt_status, Some(enums::AttemptStatus::AuthenticationPending));
+            assert_eq!(
+                error.connector_transaction_id.as_deref(),
+                Some("a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d")
+            );
+        }
+        // Waiting for the payer, not failed and not cancelled.
+        assert_eq!(
+            enums::IntentStatus::from(CANCEL_REFUSED_ATTEMPT_STATUS),
+            enums::IntentStatus::RequiresCustomerAction
+        );
     }
 
     #[test]

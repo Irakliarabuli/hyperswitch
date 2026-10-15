@@ -12984,7 +12984,6 @@ default_imp_for_pre_authorize_void!(
     connectors::Jpmorgan,
     connectors::Juspaythreedsserver,
     connectors::Katapult,
-    connectors::Keepz,
     connectors::Klarna,
     connectors::Loonio,
     connectors::Merchante,

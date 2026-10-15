@@ -27,12 +27,16 @@ use hyperswitch_domain_models::{
     router_data::{AccessToken, ConnectorAuthType, ErrorResponse, RouterData},
     router_flow_types::{
         access_token_auth::AccessTokenAuth,
-        payments::{Authorize, Capture, PSync, PaymentMethodToken, Session, SetupMandate, Void},
+        payments::{
+            Authorize, Capture, PSync, PaymentMethodToken, PreAuthorizeVoid, Session,
+            SetupMandate, Void,
+        },
         refunds::{Execute, RSync},
     },
     router_request_types::{
         AccessTokenRequestData, PaymentMethodTokenizationData, PaymentsAuthorizeData,
-        PaymentsCancelData, PaymentsCaptureData, PaymentsSessionData, PaymentsSyncData,
+        PaymentsCancelData, PaymentsCaptureData, PaymentsPreAuthorizeCancelData,
+        PaymentsSessionData, PaymentsSyncData,
         RefundsData, SetupMandateRequestData,
     },
     router_response_types::{
@@ -41,6 +45,7 @@ use hyperswitch_domain_models::{
     },
     types::{
         PaymentsAuthorizeRouterData, PaymentsCancelRouterData, PaymentsCaptureRouterData,
+        PaymentsPreAuthorizeCancelRouterData,
         PaymentsSyncRouterData, RefundSyncRouterData, RefundsRouterData,
     },
 };
@@ -135,6 +140,7 @@ impl api::PaymentAuthorize for Keepz {}
 impl api::PaymentSync for Keepz {}
 impl api::PaymentCapture for Keepz {}
 impl api::PaymentVoid for Keepz {}
+impl api::PaymentPreAuthorizeVoid for Keepz {}
 impl api::Refund for Keepz {}
 impl api::RefundExecute for Keepz {}
 impl api::RefundSync for Keepz {}
@@ -500,6 +506,100 @@ impl ConnectorIntegration<Void, PaymentsCancelData, PaymentsResponseData> for Ke
     }
 }
 
+/// Cancelling a payment that waits for the payer (`requires_customer_action`).
+/// The router uses this flow, not Void, for such a payment, and only because
+/// Keepz declares `is_pre_authorize_cancel_supported`; without it the router
+/// marked the payment cancelled locally and the Keepz order stayed payable.
+/// Same Keepz call as Void (`DELETE /order/cancel`); only CANCELLED cancels
+/// (`transformers::cancel_outcome`), and a refused or failed call leaves the
+/// payment waiting for the payer.
+impl ConnectorIntegration<PreAuthorizeVoid, PaymentsPreAuthorizeCancelData, PaymentsResponseData>
+    for Keepz
+{
+    fn get_headers(
+        &self,
+        req: &PaymentsPreAuthorizeCancelRouterData,
+        connectors: &Connectors,
+    ) -> CustomResult<Vec<(String, Maskable<String>)>, errors::ConnectorError> {
+        self.build_headers(req, connectors)
+    }
+
+    fn get_content_type(&self) -> &'static str {
+        self.common_get_content_type()
+    }
+
+    fn get_url(
+        &self,
+        req: &PaymentsPreAuthorizeCancelRouterData,
+        connectors: &Connectors,
+    ) -> CustomResult<String, errors::ConnectorError> {
+        self.envelope_url(
+            connectors,
+            ORDER_CANCEL_PATH,
+            &req.connector_auth_type,
+            req.request.connector_transaction_id.clone(),
+        )
+    }
+
+    fn build_request(
+        &self,
+        req: &PaymentsPreAuthorizeCancelRouterData,
+        connectors: &Connectors,
+    ) -> CustomResult<Option<Request>, errors::ConnectorError> {
+        Ok(Some(
+            RequestBuilder::new()
+                .method(Method::Delete)
+                .url(&types::PaymentsPreAuthorizeVoidType::get_url(
+                    self, req, connectors,
+                )?)
+                .attach_default_headers()
+                .headers(types::PaymentsPreAuthorizeVoidType::get_headers(
+                    self, req, connectors,
+                )?)
+                .build(),
+        ))
+    }
+
+    fn handle_response(
+        &self,
+        data: &PaymentsPreAuthorizeCancelRouterData,
+        event_builder: Option<&mut ConnectorEvent>,
+        res: Response,
+    ) -> CustomResult<PaymentsPreAuthorizeCancelRouterData, errors::ConnectorError> {
+        let response: keepz::KeepzOrderStatusResponse =
+            Self::parse_encrypted(&data.connector_auth_type, &res, "KeepzCancelResponse")?;
+        event_builder.map(|i| i.set_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
+        let (status, response) =
+            keepz::cancel_outcome(&response, res.status_code, &data.connector_request_reference_id);
+        Ok(RouterData {
+            status,
+            response,
+            ..data.clone()
+        })
+    }
+
+    fn get_error_response(
+        &self,
+        res: Response,
+        event_builder: Option<&mut ConnectorEvent>,
+    ) -> CustomResult<ErrorResponse, errors::ConnectorError> {
+        let mut error = self.build_error_response(res, event_builder)?;
+        error.attempt_status = Some(keepz::CANCEL_REFUSED_ATTEMPT_STATUS);
+        Ok(error)
+    }
+
+    fn get_5xx_error_response(
+        &self,
+        res: Response,
+        event_builder: Option<&mut ConnectorEvent>,
+    ) -> CustomResult<ErrorResponse, errors::ConnectorError> {
+        let mut error = self.build_error_response(res, event_builder)?;
+        error.attempt_status = Some(keepz::CANCEL_REFUSED_ATTEMPT_STATUS);
+        Ok(error)
+    }
+}
+
 impl ConnectorIntegration<Execute, RefundsData, RefundsResponseData> for Keepz {
     fn get_headers(
         &self,
@@ -748,6 +848,16 @@ impl ConnectorSpecifications for Keepz {
     fn get_supported_webhook_flows(&self) -> Option<&'static [enums::EventClass]> {
         Some(&KEEPZ_SUPPORTED_WEBHOOK_FLOWS)
     }
+
+    /// Keepz only does `local_bank_redirect`, and every Keepz order can be
+    /// cancelled while the payer has not finished (INITIAL, PROCESSING). The
+    /// router then cancels through PreAuthorizeVoid, which asks Keepz.
+    fn is_pre_authorize_cancel_supported(
+        &self,
+        _payment_method_type: Option<enums::PaymentMethodType>,
+    ) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -926,8 +1036,7 @@ mod tests {
             Some(enums::AttemptStatus::PaymentMethodAwaited)
         );
 
-        // Only the create-order is affected: a refused status call keeps the
-        // router's own handling.
+        // A refused status call keeps the router's own handling.
         let sync = ConnectorIntegration::<PSync, PaymentsSyncData, PaymentsResponseData>::get_error_response(
             Keepz::new(),
             keepz_answer(400, br#"{"message":"Order not found","statusCode":6005}"#),
@@ -935,5 +1044,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sync.attempt_status, None);
+    }
+
+    /// Without this the router cancels a payment that waits for the payer
+    /// without asking Keepz (Void is only called from requires_capture), and
+    /// the Keepz order stays payable.
+    #[test]
+    fn a_waiting_payment_is_cancelled_through_keepz() {
+        for payment_method_type in [Some(enums::PaymentMethodType::LocalBankRedirect), None] {
+            assert!(Keepz::new().is_pre_authorize_cancel_supported(payment_method_type));
+        }
+    }
+
+    /// A cancel Keepz refuses (4xx) or cannot answer (5xx) leaves the payment
+    /// waiting for the payer: never cancelled, never failed.
+    #[test]
+    fn a_refused_cancel_leaves_the_payment_waiting_for_the_payer() {
+        let refused = <Keepz as ConnectorIntegration<
+            PreAuthorizeVoid,
+            PaymentsPreAuthorizeCancelData,
+            PaymentsResponseData,
+        >>::get_error_response(
+            Keepz::new(),
+            keepz_answer(
+                400,
+                br#"{"message":"Order can not be canceled","statusCode":6020,"exceptionGroup":3}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(refused.code, "6020");
+        assert_eq!(
+            refused.attempt_status,
+            Some(enums::AttemptStatus::AuthenticationPending)
+        );
+        let unreachable = <Keepz as ConnectorIntegration<
+            PreAuthorizeVoid,
+            PaymentsPreAuthorizeCancelData,
+            PaymentsResponseData,
+        >>::get_5xx_error_response(Keepz::new(), keepz_answer(502, b"Bad Gateway"), None)
+        .unwrap();
+        assert_eq!(unreachable.status_code, 502);
+        assert_eq!(
+            unreachable.attempt_status,
+            Some(enums::AttemptStatus::AuthenticationPending)
+        );
     }
 }
