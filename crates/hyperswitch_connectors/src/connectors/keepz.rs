@@ -330,12 +330,19 @@ impl ConnectorIntegration<Authorize, PaymentsAuthorizeData, PaymentsResponseData
         })
     }
 
+    /// A create-order Keepz refused (4xx) created no order, so the payment
+    /// stays payable instead of failing: it can be confirmed again, for
+    /// example without the bank Keepz did not accept
+    /// (`transformers::refused_order_attempt_status`).
     fn get_error_response(
         &self,
         res: Response,
         event_builder: Option<&mut ConnectorEvent>,
     ) -> CustomResult<ErrorResponse, errors::ConnectorError> {
-        self.build_error_response(res, event_builder)
+        let http_code = res.status_code;
+        let mut error = self.build_error_response(res, event_builder)?;
+        error.attempt_status = keepz::refused_order_attempt_status(http_code);
+        Ok(error)
     }
 }
 
@@ -876,5 +883,57 @@ mod tests {
     #[test]
     fn source_verification_is_not_mandatory() {
         assert!(!Keepz::new().is_webhook_source_verification_mandatory());
+    }
+
+    fn keepz_answer(status_code: u16, body: &'static [u8]) -> Response {
+        Response {
+            headers: None,
+            response: bytes::Bytes::from_static(body),
+            status_code,
+        }
+    }
+
+    /// A refused create-order (Keepz' plain-JSON 4xx) keeps its code and
+    /// message and leaves the payment waiting for a payment method; a server
+    /// error at Keepz is left to the router's default handling.
+    #[test]
+    fn a_refused_create_order_keeps_the_payment_payable() {
+        let refused = ConnectorIntegration::<Authorize, PaymentsAuthorizeData, PaymentsResponseData>::get_error_response(
+            Keepz::new(),
+            keepz_answer(
+                400,
+                br#"{"message":"You do not have permission","statusCode":6031,"exceptionGroup":3}"#,
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(refused.status_code, 400);
+        assert_eq!(refused.code, "6031");
+        assert_eq!(refused.message, "You do not have permission");
+        assert_eq!(
+            refused.attempt_status,
+            Some(enums::AttemptStatus::PaymentMethodAwaited)
+        );
+
+        let unreadable = ConnectorIntegration::<Authorize, PaymentsAuthorizeData, PaymentsResponseData>::get_error_response(
+            Keepz::new(),
+            keepz_answer(403, b"<html>blocked</html>"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            unreadable.attempt_status,
+            Some(enums::AttemptStatus::PaymentMethodAwaited)
+        );
+
+        // Only the create-order is affected: a refused status call keeps the
+        // router's own handling.
+        let sync = ConnectorIntegration::<PSync, PaymentsSyncData, PaymentsResponseData>::get_error_response(
+            Keepz::new(),
+            keepz_answer(400, br#"{"message":"Order not found","statusCode":6005}"#),
+            None,
+        )
+        .unwrap();
+        assert_eq!(sync.attempt_status, None);
     }
 }

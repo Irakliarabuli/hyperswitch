@@ -93,6 +93,65 @@ pub fn integrator_order_id(reference: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Direct bank link (open banking)
+// ---------------------------------------------------------------------------
+
+// Keepz can skip its own page and send the payer straight to one bank's open
+// banking flow: the create-order field `openBankingLinkProvider` (an
+// integrator permission at Keepz). `urlForQR` is then the bank's own
+// authorization URL (for TBC, `api.tbcbank.ge/psd2/openbanking/oauth/authorize`,
+// seen on the development gateway on 2026-10-15) and the order is
+// `PROCESSING` from the start. `BankRedirectData::LocalBankRedirect {}` has no
+// fields and `common_enums::BankNames` has no Georgian banks, so the choice
+// travels in the payment's metadata under `keepz_bank`.
+
+/// Payment metadata key naming the bank for a direct open-banking link.
+pub const BANK_METADATA_KEY: &str = "keepz_bank";
+
+/// Keepz' `OpenBankingProvider` values (its validation error lists exactly
+/// these): Bank of Georgia, TBC, Credo, Liberty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum KeepzOpenBankingProvider {
+    Bog,
+    Tbc,
+    Credo,
+    Lb,
+}
+
+/// The bank named by `metadata.keepz_bank`: absent or null is no bank (the
+/// Keepz page, as before); one of the Keepz values, spelled exactly, is that
+/// bank; anything else refuses the payment before Keepz is called.
+pub fn open_banking_provider(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Option<KeepzOpenBankingProvider>, error_stack::Report<errors::ConnectorError>> {
+    match metadata.and_then(|metadata| metadata.get(BANK_METADATA_KEY)) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|_| {
+            error_stack::report!(errors::ConnectorError::InvalidDataFormat {
+                field_name: "metadata.keepz_bank".into(),
+            })
+        }),
+    }
+}
+
+/// The attempt status for a create-order Keepz refused with a 4xx answer.
+///
+/// A refused create-order creates no order at Keepz (checked on the
+/// development gateway: the refused id is unknown to the status call
+/// afterwards), so nothing is pending and nothing can be charged. The
+/// payment is left waiting for a payment method rather than failed, so the
+/// same payment, and the same attempt with the same derived order id, can be
+/// confirmed again: without the bank when Keepz refused the bank, or by card.
+/// Anything else (5xx, timeouts) keeps the router's default handling, because
+/// there the order may exist.
+pub fn refused_order_attempt_status(http_code: u16) -> Option<enums::AttemptStatus> {
+    (400..=499)
+        .contains(&http_code)
+        .then_some(enums::AttemptStatus::PaymentMethodAwaited)
+}
+
+// ---------------------------------------------------------------------------
 // Create order (Authorize)
 // ---------------------------------------------------------------------------
 
@@ -108,6 +167,9 @@ pub struct KeepzCreateOrderRequest {
     pub success_redirect_uri: String,
     pub fail_redirect_uri: String,
     pub callback_uri: String,
+    /// Sent only for a direct bank link (see `open_banking_provider`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_banking_link_provider: Option<KeepzOpenBankingProvider>,
 }
 
 impl TryFrom<&KeepzRouterData<&PaymentsAuthorizeRouterData>> for KeepzCreateOrderRequest {
@@ -120,6 +182,8 @@ impl TryFrom<&KeepzRouterData<&PaymentsAuthorizeRouterData>> for KeepzCreateOrde
                 utils::get_unimplemented_payment_method_error_message("Keepz"),
             ))?,
         }
+        let open_banking_link_provider =
+            open_banking_provider(router_data.request.metadata.as_ref())?;
         let auth = KeepzAuthType::try_from(&router_data.connector_auth_type)?;
         let return_url = router_data.request.get_router_return_url()?;
         let order_id = integrator_order_id(&router_data.connector_request_reference_id);
@@ -134,6 +198,7 @@ impl TryFrom<&KeepzRouterData<&PaymentsAuthorizeRouterData>> for KeepzCreateOrde
             success_redirect_uri: return_url.clone(),
             fail_redirect_uri: return_url,
             callback_uri,
+            open_banking_link_provider,
         })
     }
 }
@@ -666,7 +731,19 @@ mod tests {
             enums::Currency::GEL,
         )
         .unwrap();
-        let request = KeepzCreateOrderRequest {
+        let request = order_request(amount, None);
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["receiverType"], "BRANCH");
+        assert_eq!(value["currency"], "GEL");
+        assert_eq!(value["amount"], 10.0);
+        assert!(value["callbackUri"].is_string());
+    }
+
+    fn order_request(
+        amount: FloatMajorUnit,
+        bank: Option<KeepzOpenBankingProvider>,
+    ) -> KeepzCreateOrderRequest {
+        KeepzCreateOrderRequest {
             amount,
             currency: enums::Currency::GEL,
             receiver_id: Secret::new("r".to_string()),
@@ -676,11 +753,106 @@ mod tests {
             success_redirect_uri: "https://m/ok".to_string(),
             fail_redirect_uri: "https://m/ok".to_string(),
             callback_uri: "https://hs/webhooks/m/keepz".to_string(),
-        };
-        let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["receiverType"], "BRANCH");
-        assert_eq!(value["currency"], "GEL");
-        assert_eq!(value["amount"], 10.0);
-        assert!(value["callbackUri"].is_string());
+            open_banking_link_provider: bank,
+        }
+    }
+
+    fn one_lari() -> FloatMajorUnit {
+        utils::convert_amount(
+            &common_utils::types::FloatMajorUnitForConnector,
+            common_utils::types::MinorUnit::new(100),
+            enums::Currency::GEL,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn create_order_sends_the_bank_only_when_one_was_chosen() {
+        let with_bank =
+            serde_json::to_value(order_request(one_lari(), Some(KeepzOpenBankingProvider::Tbc)))
+                .unwrap();
+        assert_eq!(with_bank["openBankingLinkProvider"], "TBC");
+        // Never the card variant: that is a different Keepz permission.
+        assert!(with_bank.get("directLinkProvider").is_none());
+
+        let without_bank = serde_json::to_value(order_request(one_lari(), None)).unwrap();
+        let fields: Vec<&String> = without_bank.as_object().unwrap().keys().collect();
+        assert!(!fields.iter().any(|field| field.ends_with("LinkProvider")), "{fields:?}");
+        assert_eq!(fields.len(), 9, "{fields:?}");
+    }
+
+    #[test]
+    fn every_keepz_bank_value_serializes_as_keepz_spells_it() {
+        for (bank, spelled) in [
+            (KeepzOpenBankingProvider::Bog, "BOG"),
+            (KeepzOpenBankingProvider::Tbc, "TBC"),
+            (KeepzOpenBankingProvider::Credo, "CREDO"),
+            (KeepzOpenBankingProvider::Lb, "LB"),
+        ] {
+            assert_eq!(serde_json::to_value(bank).unwrap(), spelled);
+        }
+    }
+
+    #[test]
+    fn the_bank_comes_from_payment_metadata() {
+        use serde_json::json;
+        assert_eq!(open_banking_provider(None).unwrap(), None);
+        for metadata in [
+            json!({}),
+            json!({ "payment_attempt_id": "payatt_1" }),
+            json!({ "keepz_bank": null }),
+            json!("not an object"),
+        ] {
+            assert_eq!(open_banking_provider(Some(&metadata)).unwrap(), None, "{metadata}");
+        }
+        for (value, bank) in [
+            ("BOG", KeepzOpenBankingProvider::Bog),
+            ("TBC", KeepzOpenBankingProvider::Tbc),
+            ("CREDO", KeepzOpenBankingProvider::Credo),
+            ("LB", KeepzOpenBankingProvider::Lb),
+        ] {
+            let metadata = json!({ "payment_attempt_id": "payatt_1", "keepz_bank": value });
+            assert_eq!(open_banking_provider(Some(&metadata)).unwrap(), Some(bank));
+        }
+    }
+
+    #[test]
+    fn an_unknown_bank_refuses_the_payment_before_keepz_is_called() {
+        use serde_json::json;
+        for value in [
+            json!("tbc"),
+            json!("Bank of Georgia"),
+            json!("XYZ"),
+            json!(""),
+            json!(" TBC"),
+            json!(1),
+            json!(true),
+            json!(["TBC"]),
+            json!({ "bank": "TBC" }),
+        ] {
+            let metadata = json!({ "keepz_bank": value });
+            assert!(open_banking_provider(Some(&metadata)).is_err(), "{metadata}");
+        }
+    }
+
+    #[test]
+    fn a_refused_order_leaves_the_payment_payable_and_nothing_else_does() {
+        for http_code in [400, 401, 403, 404, 409, 422, 429, 499] {
+            assert_eq!(
+                refused_order_attempt_status(http_code),
+                Some(enums::AttemptStatus::PaymentMethodAwaited),
+                "{http_code}"
+            );
+        }
+        for http_code in [200, 201, 302, 399, 500, 502, 503, 504, 511, 599] {
+            assert_eq!(refused_order_attempt_status(http_code), None, "{http_code}");
+        }
+        // The router turns that attempt status into an unsubmitted payment,
+        // which the payments API lets the merchant confirm again.
+        assert_eq!(
+            enums::IntentStatus::from(enums::AttemptStatus::PaymentMethodAwaited),
+            enums::IntentStatus::RequiresPaymentMethod
+        );
+        assert!(!enums::AttemptStatus::PaymentMethodAwaited.is_payment_terminal_failure());
     }
 }
