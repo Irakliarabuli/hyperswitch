@@ -329,11 +329,24 @@ impl ConnectorIntegration<Authorize, PaymentsAuthorizeData, PaymentsResponseData
             Self::parse_encrypted(&data.connector_auth_type, &res, "KeepzCreateOrderResponse")?;
         event_builder.map(|i| i.set_response_body(&response));
         router_env::logger::info!(connector_response=?response);
-        RouterData::try_from(ResponseRouterData {
+        let provider = keepz::open_banking_provider(data.request.metadata.as_ref())?;
+        let mut router_data = RouterData::try_from(ResponseRouterData {
             response,
             data: data.clone(),
             http_code: res.status_code,
-        })
+        })?;
+        // A direct bank order is marked so that the status call knows its
+        // PROCESSING is where it starts (`transformers::sync_attempt_status`).
+        if let (
+            Some(provider),
+            Ok(PaymentsResponseData::TransactionResponse {
+                connector_metadata, ..
+            }),
+        ) = (provider, &mut router_data.response)
+        {
+            *connector_metadata = Some(keepz::direct_bank_metadata(provider));
+        }
+        Ok(router_data)
     }
 
     /// A create-order Keepz refused (4xx) created no order, so the payment
@@ -408,11 +421,24 @@ impl ConnectorIntegration<PSync, PaymentsSyncData, PaymentsResponseData> for Kee
             Self::parse_encrypted(&data.connector_auth_type, &res, "KeepzOrderStatusResponse")?;
         event_builder.map(|i| i.set_response_body(&response));
         router_env::logger::info!(connector_response=?response);
-        RouterData::try_from(ResponseRouterData {
+        let order_status = response.status;
+        let mut router_data = RouterData::try_from(ResponseRouterData {
             response,
             data: data.clone(),
             http_code: res.status_code,
-        })
+        })?;
+        // A direct bank order still waits for the payer while Keepz says
+        // PROCESSING, so it can still be cancelled; its mark is kept.
+        if keepz::is_direct_bank_order(data.request.connector_meta.as_ref()) {
+            router_data.status = keepz::sync_attempt_status(order_status, data.status, true);
+            if let Ok(PaymentsResponseData::TransactionResponse {
+                connector_metadata, ..
+            }) = &mut router_data.response
+            {
+                connector_metadata.clone_from(&data.request.connector_meta);
+            }
+        }
+        Ok(router_data)
     }
 
     fn get_error_response(

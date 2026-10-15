@@ -135,6 +135,46 @@ pub fn open_banking_provider(
     }
 }
 
+/// What the connector stores on a direct open-banking order (the attempt's
+/// `connector_metadata`, which PSync receives back as `connector_meta`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct KeepzOrderMetadata {
+    pub open_banking_link_provider: KeepzOpenBankingProvider,
+}
+
+pub fn direct_bank_metadata(provider: KeepzOpenBankingProvider) -> serde_json::Value {
+    serde_json::json!(KeepzOrderMetadata {
+        open_banking_link_provider: provider
+    })
+}
+
+/// Whether the order was created straight for a bank (see `sync_attempt_status`).
+pub fn is_direct_bank_order(connector_meta: Option<&serde_json::Value>) -> bool {
+    connector_meta
+        .and_then(|value| serde_json::from_value::<KeepzOrderMetadata>(value.clone()).ok())
+        .is_some()
+}
+
+/// The attempt status a status call reports. A direct open-banking order is
+/// PROCESSING at Keepz from its creation (Keepz opens the bank's consent at
+/// once), so for such an order PROCESSING says nothing about the payer: it
+/// still waits for them (`AuthenticationPending`, the payment stays
+/// `requires_customer_action`) and may still be cancelled, by the payer or
+/// when it is abandoned. Every other status maps as usual; an order created
+/// for the Keepz page keeps PROCESSING -> Pending (the payer started a card or
+/// bank step there).
+pub fn sync_attempt_status(
+    status: KeepzOrderStatus,
+    current: enums::AttemptStatus,
+    direct_bank: bool,
+) -> enums::AttemptStatus {
+    match status {
+        KeepzOrderStatus::Processing if direct_bank => enums::AttemptStatus::AuthenticationPending,
+        other => other.attempt_status(current),
+    }
+}
+
 /// The attempt status for a create-order Keepz refused with a 4xx answer.
 ///
 /// A refused create-order creates no order at Keepz (checked on the
@@ -888,6 +928,53 @@ mod tests {
             let metadata = json!({ "keepz_bank": value });
             assert!(open_banking_provider(Some(&metadata)).is_err(), "{metadata}");
         }
+    }
+
+    #[test]
+    fn a_direct_bank_order_is_marked_and_recognised() {
+        let marked = direct_bank_metadata(KeepzOpenBankingProvider::Tbc);
+        assert_eq!(marked, serde_json::json!({ "open_banking_link_provider": "TBC" }));
+        assert!(is_direct_bank_order(Some(&marked)));
+        for other in [
+            serde_json::json!({}),
+            serde_json::json!({ "open_banking_link_provider": "XYZ" }),
+            serde_json::json!("TBC"),
+            serde_json::Value::Null,
+        ] {
+            assert!(!is_direct_bank_order(Some(&other)), "{other}");
+        }
+        assert!(!is_direct_bank_order(None));
+    }
+
+    #[test]
+    fn processing_waits_for_the_payer_only_on_a_direct_bank_order() {
+        use enums::AttemptStatus as A;
+        let current = A::AuthenticationPending;
+        assert_eq!(
+            sync_attempt_status(KeepzOrderStatus::Processing, current, true),
+            A::AuthenticationPending
+        );
+        assert_eq!(
+            sync_attempt_status(KeepzOrderStatus::Processing, current, false),
+            A::Pending
+        );
+        // Everything else maps the same for both kinds of order.
+        for status in [
+            KeepzOrderStatus::Initial,
+            KeepzOrderStatus::Success,
+            KeepzOrderStatus::Failed,
+            KeepzOrderStatus::Expired,
+            KeepzOrderStatus::Canceled,
+            KeepzOrderStatus::RefundedByIntegrator,
+            KeepzOrderStatus::Unknown,
+        ] {
+            assert_eq!(
+                sync_attempt_status(status, current, true),
+                status.attempt_status(current),
+                "{status}"
+            );
+        }
+        assert_eq!(sync_attempt_status(KeepzOrderStatus::Success, current, true), A::Charged);
     }
 
     fn order(status: KeepzOrderStatus) -> KeepzOrderStatusResponse {
