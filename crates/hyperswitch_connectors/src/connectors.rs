@@ -51,6 +51,7 @@ pub mod fiservcommercehub;
 pub mod fiservemea;
 pub mod fiuu;
 pub mod flexiti;
+pub mod flitt;
 pub mod forte;
 pub mod getnet;
 pub mod gigadat;
@@ -173,7 +174,7 @@ pub use self::{
     deutschebank::Deutschebank, digitalvirgo::Digitalvirgo, dlocal::Dlocal, dwolla::Dwolla,
     ebanx::Ebanx, elavon::Elavon, envoy::Envoy, etisalat::Etisalat, facilitapay::Facilitapay,
     finix::Finix, fiserv::Fiserv, fiservcommercehub::Fiservcommercehub, fiservemea::Fiservemea,
-    fiuu::Fiuu, flexiti::Flexiti, forte::Forte, getnet::Getnet, gigadat::Gigadat,
+    fiuu::Fiuu, flexiti::Flexiti, flitt::Flitt, forte::Forte, getnet::Getnet, gigadat::Gigadat,
     givepayments::Givepayments, globalpay::Globalpay, globepay::Globepay, gocardless::Gocardless,
     gotyme_sanlam::GotymeSanlam, gpayments::Gpayments, helcim::Helcim, hipay::Hipay,
     hyperpg::Hyperpg, hyperswitch_vault::HyperswitchVault, hyperwallet::Hyperwallet,

@@ -252,6 +252,7 @@ fiservcommercehub.base_url = "https://connect-cert.fiservapis.com/ch/"
 fiservemea.base_url = "https://prod.emea.api.fiservapps.com/sandbox"
 fiuu.base_url = "https://sandbox.merchant.razer.com/"
 flexiti.base_url = "https://onlineapi.flexiti.fi/flexiti/online-api/"
+flitt.base_url = "https://pay.flitt.com"
 fiuu.secondary_base_url = "https://sandbox.merchant.razer.com/"
 fiuu.third_base_url = "https://api.merchant.razer.com/"
 forte.base_url = "https://sandbox.forte.net/api/v3"
@@ -720,6 +721,9 @@ open_banking_uk = { country = "DE,GB,AT,BE,CY,EE,ES,FI,FR,GR,HR,IE,IT,LT,LU,LV,M
 
 [pm_filters.keepz]
 local_bank_redirect = { country = "GE", currency = "GEL" }
+
+[pm_filters.flitt]
+local_bank_redirect = { country = "GE", currency = "GEL,USD,EUR" }
 
 [pm_filters.razorpay]
 upi_collect = { country = "IN", currency = "INR" }

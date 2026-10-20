@@ -362,6 +362,10 @@ impl ConnectorAuthTypeAndMetadataValidation<'_> {
                 Ok(())
             }
             api_enums::Connector::Juspay | api_enums::Connector::Juspaythreedsserver => Ok(()),
+            api_enums::Connector::Flitt => {
+                flitt::transformers::FlittAuthType::try_from(self.auth_type)?;
+                Ok(())
+            }
             api_enums::Connector::Keepz => {
                 keepz::transformers::KeepzAuthType::try_from(self.auth_type)?;
                 Ok(())

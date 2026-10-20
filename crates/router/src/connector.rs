@@ -22,7 +22,7 @@ pub use hyperswitch_connectors::connectors::{
     ebanx::Ebanx, elavon, elavon::Elavon, envoy, envoy::Envoy, etisalat, etisalat::Etisalat,
     facilitapay, facilitapay::Facilitapay, finix, finix::Finix, fiserv, fiserv::Fiserv,
     fiservcommercehub, fiservcommercehub::Fiservcommercehub, fiservemea, fiservemea::Fiservemea,
-    fiuu, fiuu::Fiuu, flexiti, flexiti::Flexiti, forte, forte::Forte, getnet, getnet::Getnet,
+    fiuu, fiuu::Fiuu, flexiti, flexiti::Flexiti, flitt, flitt::Flitt, forte, forte::Forte, getnet, getnet::Getnet,
     gigadat, gigadat::Gigadat, givepayments, givepayments::Givepayments, globalpay,
     globalpay::Globalpay, globepay, globepay::Globepay, gocardless, gocardless::Gocardless,
     gotyme_sanlam, gotyme_sanlam::GotymeSanlam, gpayments, gpayments::Gpayments, helcim,

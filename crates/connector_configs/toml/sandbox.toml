@@ -9265,6 +9265,13 @@ payment_method_type = "DinersClub"
 api_key = "Profile Key"
 key1 = "Profile ID"
 
+[flitt]
+[[flitt.bank_redirect]]
+  payment_method_type = "local_bank_redirect"
+[flitt.connector_auth.BodyKey]
+api_key = "Payment Secret Key"
+key1 = "Merchant ID"
+
 [keepz]
 [[keepz.bank_redirect]]
   payment_method_type = "local_bank_redirect"
