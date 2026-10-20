@@ -89,6 +89,7 @@ pub struct Connectors {
     pub cardinal: NoParams,
     pub katapult: ConnectorParams,
     pub keepz: ConnectorParams,
+    pub flitt: ConnectorParams,
     pub klarna: ConnectorParams,
     pub loonio: ConnectorParams,
     pub merchante: ConnectorParams,

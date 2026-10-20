@@ -114,6 +114,7 @@ pub enum Connector {
     Fiservcommercehub,
     Fiuu,
     Flexiti,
+    Flitt,
     Forte,
     Getnet,
     Gigadat,
@@ -382,6 +383,7 @@ impl Connector {
             | Self::Fiservemea
             | Self::Fiuu
             | Self::Flexiti
+            | Self::Flitt
             | Self::Forte
             | Self::Getnet
             | Self::Gigadat

@@ -70,6 +70,7 @@ impl ForeignTryFrom<api_enums::Connector> for euclid::enums::RoutableConnectors 
             api_enums::Connector::Fiservcommercehub => Self::Fiservcommercehub,
             api_enums::Connector::Fiuu => Self::Fiuu,
             api_enums::Connector::Flexiti => Self::Flexiti,
+            api_enums::Connector::Flitt => Self::Flitt,
             api_enums::Connector::Forte => Self::Forte,
             api_enums::Connector::Getnet => Self::Getnet,
             api_enums::Connector::Gigadat => Self::Gigadat,

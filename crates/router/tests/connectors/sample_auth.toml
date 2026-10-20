@@ -191,6 +191,10 @@ api_key="API Key"
 [gocardless]
 api_key="API Key"
 
+[flitt]
+api_key = "Payment Secret Key"
+key1 = "Merchant ID"
+
 [keepz]
 api_key = "Integrator ID"
 key1 = "Keepz RSA Public Key"
