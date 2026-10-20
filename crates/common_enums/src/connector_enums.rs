@@ -114,6 +114,7 @@ pub enum Connector {
     Fiservcommercehub,
     Fiuu,
     Flexiti,
+    Flitt,
     Forte,
     Getnet,
     Gigadat,
@@ -382,6 +383,7 @@ impl Connector {
             | Self::Fiservemea
             | Self::Fiuu
             | Self::Flexiti
+            | Self::Flitt
             | Self::Forte
             | Self::Getnet
             | Self::Gigadat
@@ -502,8 +504,26 @@ impl Connector {
         matches!(self, Self::Stripe | Self::Adyen)
     }
 
+    /// Connectors whose failed incoming webhooks are answered with the
+    /// connector's own acknowledgement instead of an error
+    /// (`handle_incoming_webhook_error` in the router's webhook core, the only
+    /// caller). Despite the name this covers every processing failure, not
+    /// only "resource not found": the kind of failure is handed to the
+    /// connector's `get_webhook_api_response`, which decides the answer.
+    ///
+    /// It never changes what a webhook may do. Whether a webhook's content is
+    /// applied is decided by source verification alone.
+    ///
+    /// Keepz: its callback is an unsigned trigger addressed by an order id in
+    /// the URL, and payment state only ever comes from the order-status call
+    /// that trigger starts. Every callback gets the same 200, whether or not
+    /// the id names a payment and whether or not the status call worked, so
+    /// the endpoint says nothing about which ids exist.
+    ///
+    /// Named variants only: adding a wildcard here would acknowledge failed
+    /// webhooks for every connector.
     pub fn should_acknowledge_webhook_for_resource_not_found_errors(self) -> bool {
-        matches!(self, Self::Adyenplatform | Self::Adyen)
+        matches!(self, Self::Adyenplatform | Self::Adyen | Self::Keepz)
     }
 
     pub fn should_store_google_pay_pan_only_for_three_ds(
@@ -564,4 +584,41 @@ pub enum InvoiceStatus {
     InvoicePaid,
     ManualReview,
     Voided,
+}
+
+#[cfg(test)]
+mod tests {
+    use strum::IntoEnumIterator;
+
+    use super::Connector;
+
+    /// The router answers a failed incoming webhook with the connector's own
+    /// acknowledgement only for the connectors this switch names. Pin the
+    /// whole set, so neither a wildcard nor another connector can be added
+    /// unnoticed.
+    #[test]
+    fn exactly_three_connectors_acknowledge_failed_webhooks() {
+        let acknowledging: Vec<Connector> = Connector::iter()
+            .filter(|connector| {
+                connector.should_acknowledge_webhook_for_resource_not_found_errors()
+            })
+            .collect();
+        assert_eq!(
+            acknowledging.len(),
+            3,
+            "unexpected connectors acknowledge failed webhooks: {acknowledging:?}"
+        );
+        for connector in [Connector::Adyen, Connector::Adyenplatform, Connector::Keepz] {
+            assert!(acknowledging.contains(&connector), "{connector:?}");
+        }
+    }
+
+    /// The two switches on this enum that name Keepz.
+    #[test]
+    fn keepz_arms() {
+        // Its callback is a trigger that always gets the same acknowledgement.
+        assert!(Connector::Keepz.should_acknowledge_webhook_for_resource_not_found_errors());
+        // A hosted checkout: there is no separate authentication step.
+        assert!(!Connector::Keepz.is_separate_authentication_supported());
+    }
 }

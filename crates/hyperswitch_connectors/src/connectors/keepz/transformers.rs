@@ -1,10 +1,11 @@
 //! Request/response models for the Keepz eCommerce integrator API.
 //!
 //! Keepz exposes a hosted checkout page: the connector creates an order,
-//! redirects the customer to `urlForQR`, and learns the outcome either from
-//! the plain-JSON callback or by polling the order status. Amounts are
-//! exchanged in major units (`12.50` GEL) and every payload travels inside
-//! the hybrid-encrypted envelope implemented in [`super::crypto`].
+//! redirects the customer to `urlForQR`, and learns the outcome by asking for
+//! the order status; the Keepz callback only says which order to ask about
+//! (see "Callback"). Amounts are exchanged in major units (`12.50` GEL) and
+//! every payload travels inside the hybrid-encrypted envelope implemented in
+//! [`super::crypto`].
 
 use common_enums::enums;
 use common_utils::{request::Method, types::FloatMajorUnit};
@@ -121,16 +122,18 @@ impl TryFrom<&KeepzRouterData<&PaymentsAuthorizeRouterData>> for KeepzCreateOrde
         }
         let auth = KeepzAuthType::try_from(&router_data.connector_auth_type)?;
         let return_url = router_data.request.get_router_return_url()?;
+        let order_id = integrator_order_id(&router_data.connector_request_reference_id);
+        let callback_uri = callback_uri(&router_data.request.get_webhook_url()?, &order_id)?;
         Ok(Self {
             amount: item.amount,
             currency: router_data.request.currency,
             receiver_id: auth.receiver_id,
             receiver_type: RECEIVER_TYPE_BRANCH,
             integrator_id: auth.integrator_id,
-            integrator_order_id: integrator_order_id(&router_data.connector_request_reference_id),
+            integrator_order_id: order_id,
             success_redirect_uri: return_url.clone(),
             fail_redirect_uri: return_url,
-            callback_uri: router_data.request.get_webhook_url()?,
+            callback_uri,
         })
     }
 }
@@ -251,7 +254,7 @@ impl KeepzOrderStatus {
 }
 
 /// Decrypted body of `GET /order/status`, `DELETE /order/cancel` and
-/// `POST /order/refund/v2`, and also the shape of the plain callback.
+/// `POST /order/refund/v2`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeepzOrderStatusResponse {
@@ -397,37 +400,60 @@ impl TryFrom<RefundsResponseRouterData<RSync, KeepzOrderStatusResponse>>
 // Callback (incoming webhook)
 // ---------------------------------------------------------------------------
 
-/// Plain-JSON body Keepz POSTs to `callbackUri` once the payment settles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeepzCallbackBody {
-    pub integrator_order_id: String,
-    pub status: KeepzOrderStatus,
-    #[serde(default)]
-    pub amount: Option<f64>,
-    #[serde(default)]
-    pub transaction_id: Option<serde_json::Value>,
-    #[serde(default)]
-    pub initial_currency: Option<String>,
+// Keepz POSTs to the order's `callbackUri` once the payment settles. The body
+// is not the plain JSON its documentation shows: it is the hybrid envelope
+// (`{ encryptedData, aes, encryptedKeys }`) sealed to the integrator's key,
+// and it carries no signature. The connector therefore never reads it. It
+// neither decrypts it (that would put the integrator private key on a public,
+// unauthenticated endpoint and turn the endpoint into a decryption oracle)
+// nor trusts anything in it. The callback is only a trigger: the order to ask
+// Keepz about is named in the callback URL itself, which we choose per order,
+// and the router then runs a real, authenticated order-status call.
+
+/// Query parameter on `callbackUri` that names the order.
+pub const CALLBACK_REFERENCE_PARAM: &str = "ref";
+
+/// The event every callback is treated as, whatever its body says. It only
+/// selects the router's payments flow; with an unverified source that flow
+/// syncs the payment with Keepz and takes the status from that answer.
+pub const CALLBACK_EVENT: api_models::webhooks::IncomingWebhookEvent =
+    api_models::webhooks::IncomingWebhookEvent::PaymentIntentProcessing;
+
+/// The per-order callback URL: the router's webhook URL plus the Keepz order
+/// id (`?ref=<integratorOrderId>`).
+pub fn callback_uri(
+    webhook_url: &str,
+    integrator_order_id: &str,
+) -> Result<String, error_stack::Report<errors::ConnectorError>> {
+    let mut url = url::Url::parse(webhook_url).map_err(|_| {
+        error_stack::report!(errors::ConnectorError::RequestEncodingFailed)
+            .attach_printable("The webhook URL for the Keepz callback is not a valid URL")
+    })?;
+    url.query_pairs_mut()
+        .append_pair(CALLBACK_REFERENCE_PARAM, integrator_order_id);
+    Ok(url.to_string())
 }
 
-impl From<KeepzOrderStatus> for api_models::webhooks::IncomingWebhookEvent {
-    fn from(status: KeepzOrderStatus) -> Self {
-        match status {
-            KeepzOrderStatus::Success => Self::PaymentIntentSuccess,
-            KeepzOrderStatus::Failed | KeepzOrderStatus::Expired => Self::PaymentIntentFailure,
-            KeepzOrderStatus::Canceled => Self::PaymentIntentCancelled,
-            KeepzOrderStatus::Processing => Self::PaymentIntentProcessing,
-            KeepzOrderStatus::RefundRequested
-            | KeepzOrderStatus::PartiallyRefunded
-            | KeepzOrderStatus::RefundedByOperator
-            | KeepzOrderStatus::RefundedByIntegrator
-            | KeepzOrderStatus::RefundedByKeepz
-            | KeepzOrderStatus::RefundedFailed
-            | KeepzOrderStatus::Initial
-            | KeepzOrderStatus::Unknown => Self::EventNotSupported,
-        }
+/// Reads the order id back from a callback's query string. Only exactly one
+/// `ref` parameter in the canonical form this connector writes (a lowercase,
+/// hyphenated UUID) is a reference; anything else is none.
+pub fn callback_reference(query: &str) -> Option<String> {
+    let mut references = url::form_urlencoded::parse(query.as_bytes())
+        .filter_map(|(name, value)| (name == CALLBACK_REFERENCE_PARAM).then(|| value.into_owned()));
+    let reference = references.next()?;
+    if references.next().is_some() {
+        return None;
     }
+    let parsed = uuid::Uuid::try_parse(&reference).ok()?;
+    (parsed.hyphenated().to_string() == reference).then_some(reference)
+}
+
+/// What the router logs as the callback's content: the order id from the
+/// URL. Nothing from the body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepzCallbackTrigger {
+    pub integrator_order_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -538,29 +564,75 @@ mod tests {
     }
 
     #[test]
-    fn callback_body_parses_and_maps_to_events() {
-        use api_models::webhooks::IncomingWebhookEvent as E;
-        let body = serde_json::json!({
-            "amount": 12.5,
-            "receiverId": "0b1f6e58-1c5f-4a7e-9d1e-3f0d7c9b2a11",
-            "receiverType": "BRANCH",
-            "integratorId": "6d9b0c1e-2f3a-4b5c-8d7e-9f0a1b2c3d4e",
-            "integratorOrderId": "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-            "status": "SUCCESS",
-            "initialCurrency": "GEL",
-            "transactionId": 123456
-        });
-        let parsed: KeepzCallbackBody = serde_json::from_value(body).unwrap();
+    fn callback_uri_names_the_order_in_its_query() {
+        let order_id = integrator_order_id("pay_abc_1");
         assert_eq!(
-            parsed.integrator_order_id,
-            "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+            callback_uri("https://hs.example.test/webhooks/merchant_1/mca_1", &order_id).unwrap(),
+            format!("https://hs.example.test/webhooks/merchant_1/mca_1?ref={order_id}")
         );
-        assert_eq!(parsed.amount, Some(12.5));
-        assert_eq!(E::from(parsed.status), E::PaymentIntentSuccess);
-        assert_eq!(E::from(KeepzOrderStatus::Failed), E::PaymentIntentFailure);
+        // A query that is already there is kept.
         assert_eq!(
-            E::from(KeepzOrderStatus::RefundRequested),
-            E::EventNotSupported
+            callback_uri("https://hs.example.test/webhooks/m/mca_1?x=1", &order_id).unwrap(),
+            format!("https://hs.example.test/webhooks/m/mca_1?x=1&ref={order_id}")
+        );
+        assert!(callback_uri("not a url", &order_id).is_err());
+    }
+
+    #[test]
+    fn callback_reference_round_trips_through_the_callback_uri() {
+        let order_id = integrator_order_id("pay_abc_1");
+        let uri = callback_uri("https://hs.example.test/webhooks/m/mca_1", &order_id).unwrap();
+        let query = url::Url::parse(&uri).unwrap().query().unwrap().to_string();
+        assert_eq!(callback_reference(&query), Some(order_id));
+    }
+
+    #[test]
+    fn callback_reference_accepts_only_one_canonical_uuid() {
+        let id = "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+        assert_eq!(callback_reference(&format!("ref={id}")), Some(id.to_string()));
+        assert_eq!(
+            callback_reference(&format!("utm=1&ref={id}&other=x")),
+            Some(id.to_string())
+        );
+        for query in [
+            String::new(),
+            "ref=".to_string(),
+            "ref".to_string(),
+            format!("reference={id}"),
+            format!("REF={id}"),
+            // More than one reference is no reference.
+            format!("ref={id}&ref={id}"),
+            format!("ref={id}&ref=b4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"),
+            // Other spellings of the same UUID.
+            format!("ref={}", id.to_uppercase()),
+            format!("ref={}", id.replace('-', "")),
+            format!("ref=%7B{id}%7D"),
+            format!("ref=urn:uuid:{id}"),
+            // Not a UUID, or a UUID with something attached.
+            "ref=pay_abc_1".to_string(),
+            "ref=../../payments".to_string(),
+            format!("ref={id}%20"),
+            format!("ref={id}x"),
+            format!("ref={id}%00"),
+            "ref=a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5".to_string(),
+            "ref=g4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d".to_string(),
+        ] {
+            assert_eq!(callback_reference(&query), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn every_callback_is_the_same_trigger_event() {
+        use api_models::webhooks::{IncomingWebhookEvent as E, WebhookFlow};
+        assert_eq!(CALLBACK_EVENT, E::PaymentIntentProcessing);
+        // The payments flow: with an unverified source the router syncs.
+        assert!(matches!(WebhookFlow::from(CALLBACK_EVENT), WebhookFlow::Payment));
+        let trigger = KeepzCallbackTrigger {
+            integrator_order_id: "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&trigger).unwrap(),
+            serde_json::json!({ "integratorOrderId": "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d" })
         );
     }
 

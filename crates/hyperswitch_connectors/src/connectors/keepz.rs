@@ -2,11 +2,13 @@
 //!
 //! Flows: Authorize (create order -> redirect to `urlForQR`), PSync (order
 //! status), Void (cancel), Refund (async refund/v2), RSync (order status) and
-//! the plain-JSON payment callback as an incoming webhook.
+//! the payment callback as an incoming webhook.
 //!
-//! Keepz does not sign callbacks, so webhook source verification always
-//! reports "unverified"; the router then re-fetches the order status from
-//! Keepz (PSync) instead of trusting the callback body.
+//! The callback is used as a trigger only. Keepz sends it as an encrypted,
+//! unsigned envelope; the connector never opens it. Each order's
+//! `callbackUri` carries the order id as a query parameter, the webhook
+//! reads that id from the URL, reports the source as unverified, and the
+//! router then asks Keepz for the order status (PSync) and uses that answer.
 
 pub mod crypto;
 pub mod transformers;
@@ -642,12 +644,22 @@ impl ConnectorIntegration<RSync, RefundsData, RefundsResponseData> for Keepz {
     }
 }
 
+/// The Keepz callback is a trigger and nothing more.
+///
+/// Its body is the Keepz envelope sealed to the integrator's key, without a
+/// signature. None of the functions below reads it: opening it here would put
+/// the integrator private key on a public, unauthenticated endpoint (and make
+/// that endpoint a decryption oracle), and nothing in it could be trusted
+/// anyway. The order is named by the `ref` query parameter this connector
+/// puts on every order's `callbackUri`; the event is always the same; and
+/// because the source is reported as unverified, the router's payments flow
+/// (`payments_incoming_webhook_flow`) calls the connector with
+/// `CallConnectorAction::Trigger` and `force_sync: true`: a real order-status
+/// request to Keepz, whose authenticated answer is the only thing that sets
+/// the payment's status. Knowing an order id therefore buys an outsider one
+/// status check of that order, which Keepz' unsigned callback always allowed.
 #[async_trait::async_trait]
 impl webhooks::IncomingWebhook for Keepz {
-    /// Keepz callbacks carry no signature. Reporting the source as
-    /// unverified makes the router treat the callback as a trigger only: it
-    /// runs a PSync against Keepz and uses that (encrypted, authenticated)
-    /// response as the source of truth instead of the callback body.
     async fn verify_webhook_source(
         &self,
         _request: &webhooks::IncomingWebhookRequestDetails<'_>,
@@ -663,27 +675,19 @@ impl webhooks::IncomingWebhook for Keepz {
         &self,
         request: &webhooks::IncomingWebhookRequestDetails<'_>,
     ) -> CustomResult<api_models::webhooks::ObjectReferenceId, errors::ConnectorError> {
-        let body: keepz::KeepzCallbackBody = request
-            .body
-            .parse_struct("KeepzCallbackBody")
-            .change_context(errors::ConnectorError::WebhookReferenceIdNotFound)?;
+        let order_id = keepz::callback_reference(&request.query_params)
+            .ok_or(errors::ConnectorError::WebhookReferenceIdNotFound)?;
         Ok(api_models::webhooks::ObjectReferenceId::PaymentId(
-            api_models::payments::PaymentIdType::ConnectorTransactionId(body.integrator_order_id),
+            api_models::payments::PaymentIdType::ConnectorTransactionId(order_id),
         ))
     }
 
     fn get_webhook_event_type(
         &self,
-        request: &webhooks::IncomingWebhookRequestDetails<'_>,
+        _request: &webhooks::IncomingWebhookRequestDetails<'_>,
         _context: Option<&webhooks::WebhookContext>,
     ) -> CustomResult<api_models::webhooks::IncomingWebhookEvent, errors::ConnectorError> {
-        let body: keepz::KeepzCallbackBody = request
-            .body
-            .parse_struct("KeepzCallbackBody")
-            .change_context(errors::ConnectorError::WebhookEventTypeNotFound)?;
-        Ok(api_models::webhooks::IncomingWebhookEvent::from(
-            body.status,
-        ))
+        Ok(keepz::CALLBACK_EVENT)
     }
 
     fn get_webhook_resource_object(
@@ -691,11 +695,11 @@ impl webhooks::IncomingWebhook for Keepz {
         request: &webhooks::IncomingWebhookRequestDetails<'_>,
     ) -> CustomResult<Box<dyn hyperswitch_masking::ErasedMaskSerialize>, errors::ConnectorError>
     {
-        let body: keepz::KeepzCallbackBody = request
-            .body
-            .parse_struct("KeepzCallbackBody")
-            .change_context(errors::ConnectorError::WebhookResourceObjectNotFound)?;
-        Ok(Box::new(body))
+        let integrator_order_id = keepz::callback_reference(&request.query_params)
+            .ok_or(errors::ConnectorError::WebhookResourceObjectNotFound)?;
+        Ok(Box::new(keepz::KeepzCallbackTrigger {
+            integrator_order_id,
+        }))
     }
 }
 
@@ -736,5 +740,141 @@ impl ConnectorSpecifications for Keepz {
 
     fn get_supported_webhook_flows(&self) -> Option<&'static [enums::EventClass]> {
         Some(&KEEPZ_SUPPORTED_WEBHOOK_FLOWS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api_models::{
+        payments::PaymentIdType,
+        webhooks::{IncomingWebhookEvent, ObjectReferenceId},
+    };
+    use hyperswitch_interfaces::webhooks::{IncomingWebhook as _, IncomingWebhookRequestDetails};
+
+    use super::*;
+
+    const ORDER_ID: &str = "a4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+    const OTHER_ORDER_ID: &str = "b4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+
+    fn callback<'a>(
+        headers: &'a actix_web::http::header::HeaderMap,
+        query: &str,
+        body: &'a [u8],
+    ) -> IncomingWebhookRequestDetails<'a> {
+        IncomingWebhookRequestDetails {
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/webhooks/merchant_1/mca_1"),
+            headers,
+            body,
+            query_params: query.to_string(),
+        }
+    }
+
+    fn referenced_order(request: &IncomingWebhookRequestDetails<'_>) -> Option<String> {
+        match Keepz::new().get_webhook_object_reference_id(request) {
+            Ok(ObjectReferenceId::PaymentId(PaymentIdType::ConnectorTransactionId(id))) => {
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
+    fn event(request: &IncomingWebhookRequestDetails<'_>) -> Option<IncomingWebhookEvent> {
+        Keepz::new().get_webhook_event_type(request, None).ok()
+    }
+
+    /// What Keepz really sends (its sealed envelope), what a forger would
+    /// send (the documented plain JSON, claiming success for another order),
+    /// and noise.
+    fn bodies() -> Vec<&'static [u8]> {
+        vec![
+            br#"{"encryptedData":"AAAA","aes":true,"encryptedKeys":"BBBB"}"# as &[u8],
+            br#"{"integratorOrderId":"b4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d","status":"SUCCESS","amount":1.5}"#
+                as &[u8],
+            b"integratorOrderId=b4b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d&status=SUCCESS" as &[u8],
+            b"not json at all" as &[u8],
+            b"" as &[u8],
+        ]
+    }
+
+    #[test]
+    fn the_order_comes_from_the_url_and_the_body_is_ignored() {
+        let headers = actix_web::http::header::HeaderMap::new();
+        let query = format!("ref={ORDER_ID}");
+        for body in bodies() {
+            let request = callback(&headers, &query, body);
+            assert_eq!(referenced_order(&request), Some(ORDER_ID.to_string()));
+            assert_eq!(event(&request), Some(IncomingWebhookEvent::PaymentIntentProcessing));
+            // The logged content is the order id from the URL (its shape is
+            // checked with `KeepzCallbackTrigger` in the transformers tests).
+            assert!(Keepz::new().get_webhook_resource_object(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_body_cannot_name_the_order() {
+        let headers = actix_web::http::header::HeaderMap::new();
+        for body in bodies() {
+            // No reference in the URL: nothing in the body supplies one.
+            let request = callback(&headers, "", body);
+            assert_eq!(referenced_order(&request), None);
+            assert!(Keepz::new().get_webhook_resource_object(&request).is_err());
+            // The event stays the same fixed trigger either way.
+            assert_eq!(event(&request), Some(IncomingWebhookEvent::PaymentIntentProcessing));
+        }
+        // The URL names one order; a body naming another changes nothing.
+        let request = callback(&headers, &format!("ref={ORDER_ID}"), bodies()[1]);
+        assert_eq!(referenced_order(&request), Some(ORDER_ID.to_string()));
+        assert_ne!(referenced_order(&request), Some(OTHER_ORDER_ID.to_string()));
+    }
+
+    #[test]
+    fn a_malformed_reference_is_no_reference() {
+        let headers = actix_web::http::header::HeaderMap::new();
+        for query in [
+            "ref=pay_abc_1".to_string(),
+            format!("ref={}", ORDER_ID.to_uppercase()),
+            format!("ref={ORDER_ID}&ref={OTHER_ORDER_ID}"),
+            format!("order={ORDER_ID}"),
+        ] {
+            let request = callback(&headers, &query, b"");
+            assert_eq!(referenced_order(&request), None, "{query}");
+        }
+    }
+
+    /// `Connector::Keepz` is in the router's acknowledge-on-failure switch,
+    /// so the answer to a failed callback is whatever this connector says.
+    /// It says the same thing every time: a plain 200 for a callback that
+    /// worked, for one whose reference names nothing, and for one whose
+    /// processing failed. This pins the trait default, which Keepz relies on.
+    #[test]
+    fn every_callback_gets_the_same_acknowledgement() {
+        let headers = actix_web::http::header::HeaderMap::new();
+        for query in [format!("ref={ORDER_ID}"), "ref=nothing".to_string(), String::new()] {
+            let request = callback(&headers, &query, b"");
+            let acknowledged = |error_kind| {
+                matches!(
+                    Keepz::new().get_webhook_api_response(&request, error_kind, None),
+                    Ok(hyperswitch_domain_models::api::WebhookResponse::StatusOk)
+                )
+            };
+            assert!(acknowledged(None), "{query}");
+            assert!(
+                acknowledged(Some(webhooks::IncomingWebhookFlowError::ResourceNotFound)),
+                "{query}"
+            );
+            assert!(
+                acknowledged(Some(webhooks::IncomingWebhookFlowError::InternalError)),
+                "{query}"
+            );
+        }
+    }
+
+    /// The source of a callback is never verified (`verify_webhook_source`
+    /// answers false), and that must not be mandatory: the router would then
+    /// reject every callback instead of running the status call.
+    #[test]
+    fn source_verification_is_not_mandatory() {
+        assert!(!Keepz::new().is_webhook_source_verification_mandatory());
     }
 }
